@@ -1,6 +1,6 @@
 [project]
 name = "rodin-gen2-mcp"
-version = "0.1.0"
+version = "0.1.3"
 description = "MCP Server for Rodin Gen-2 3D Generation API"
 authors = [
     {name = "Igor Nazarov", email = "tigron.dev@gmail.com"}
