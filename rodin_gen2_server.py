@@ -8,6 +8,8 @@ import os
 import logging
 import asyncio
 import uuid
+import argparse
+import time
 from typing import Any, Optional
 from pathlib import Path
 
@@ -26,6 +28,34 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
+
+
+def setup_logging(log_file: Optional[str] = None) -> None:
+    """
+    Настраивает логирование в файл для диагностики проблем.
+    
+    Args:
+        log_file: Путь к файлу для записи логов. Если None, логирование только в stderr.
+    """
+    if log_file:
+        # Создаем file handler для записи в файл
+        file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
+        file_handler.setLevel(logging.DEBUG)  # Детальное логирование в файл
+        
+        # Форматтер для файла - более подробный
+        file_formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        file_handler.setFormatter(file_formatter)
+        
+        # Добавляем handler к root logger
+        root_logger = logging.getLogger()
+        root_logger.addHandler(file_handler)
+        root_logger.setLevel(logging.DEBUG)  # Устанавливаем DEBUG уровень для root logger
+        
+        logger.info(f"Логирование в файл настроено: {log_file}")
+        logger.debug("Режим детального логирования активирован")
 
 download_tasks: dict[str, dict[str, Any]] = {}
 download_tasks_lock: Optional[asyncio.Lock] = None
@@ -91,20 +121,32 @@ async def make_rodin_request(
     
     url = f"{RODIN_API_BASE_URL}{endpoint}"
     
+    logger.debug(f"Начало запроса: {method} {url} (timeout={timeout}s)")
+    start_time = time.time()
+    
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             if method.upper() == "POST" and files:
                 # Для multipart/form-data запросов
+                logger.debug(f"POST запрос с файлами: {len(files)} файл(ов)")
                 response = await client.post(url, headers=headers, files=files, data=data)
             elif method.upper() == "POST":
+                logger.debug(f"POST запрос с данными: {data}")
                 response = await client.post(url, headers=headers, data=data)
             elif method.upper() == "GET":
+                logger.debug("GET запрос")
                 response = await client.get(url, headers=headers)
             else:
                 raise ValueError(f"Неподдерживаемый HTTP метод: {method}")
             
+            elapsed_time = time.time() - start_time
+            logger.debug(f"Ответ получен за {elapsed_time:.2f}s, status={response.status_code}")
+            
             response.raise_for_status()
-            return response.json()
+            response_json = response.json()
+            
+            logger.debug(f"JSON ответ размером ~{len(str(response_json))} символов")
+            return response_json
             
         except httpx.HTTPStatusError as e:
             error_detail = e.response.text
@@ -166,6 +208,7 @@ async def generate_3d_text_to_3d(
         form_data["bbox_condition"] = str(bbox_condition)
     
     try:
+        logger.debug(f"Генерация Text-to-3D с параметрами: prompt='{prompt[:50]}...', seed={seed}, format={geometry_file_format}")
         result = await make_rodin_request(
             endpoint="/rodin",
             method="POST",
@@ -173,6 +216,7 @@ async def generate_3d_text_to_3d(
             timeout=120.0
         )
         
+        logger.debug("Получен ответ от API для Text-to-3D генерации")
         uuid = result.get("uuid")
         jobs = result.get("jobs", {})
         subscription_key = jobs.get("subscription_key")
@@ -251,6 +295,7 @@ async def generate_3d_image_to_3d(
     
     # Открываем и читаем файлы изображений
     try:
+        logger.debug(f"Генерация Image-to-3D из {len(image_paths)} изображений, seed={seed}, format={geometry_file_format}")
         for image_path in image_paths:
             path = Path(image_path)
             if not path.exists():
@@ -337,12 +382,15 @@ async def check_task_status(subscription_key: str) -> str:
         Текущий статус всех подзадач
     """
     try:
+        logger.debug(f"Проверка статуса задачи с subscription_key: {subscription_key[:16]}...")
         result = await make_rodin_request(
             endpoint="/status",
             method="POST",
             data={"subscription_key": subscription_key},
             timeout=5.0
         )
+        
+        logger.debug(f"Получен ответ для проверки статуса: {len(result.get('jobs', []))} задач(и)")
         
         # Даём контроль event loop после HTTP запроса
         await asyncio.sleep(0)
@@ -391,13 +439,16 @@ async def check_task_status(subscription_key: str) -> str:
 
 async def _download_result_background(task_uuid: str, output_dir: Optional[str], task_id: str) -> None:
     # Ограничиваем количество одновременных загрузок через семафор
+    logger.debug(f"Начало фоновой загрузки: task_uuid={task_uuid}, task_id={task_id}")
     async with get_download_semaphore():
+        logger.debug(f"Получен слот семафора для загрузки {task_id}")
         try:
             async with get_download_lock():
                 task_info = download_tasks.get(task_id)
                 if task_info is not None:
                     task_info["status"] = "running"
-
+            
+            logger.debug(f"Запрашиваем список файлов для task_uuid={task_uuid}")
             result = await make_rodin_request(
                 endpoint="/download",
                 method="POST",
@@ -521,6 +572,8 @@ async def start_download_result(task_uuid: str, output_dir: Optional[str] = None
         Человекочитаемое сообщение с task_id фоновой задачи загрузки.
     """
     task_id = str(uuid.uuid4())
+    logger.info(f"Запуск фоновой загрузки для task_uuid={task_uuid}, download_task_id={task_id}")
+    logger.debug(f"Output directory: {output_dir or 'current directory'}")
 
     async with get_download_lock():
         download_tasks[task_id] = {
@@ -533,6 +586,7 @@ async def start_download_result(task_uuid: str, output_dir: Optional[str] = None
         }
 
     asyncio.create_task(_download_result_background(task_uuid, output_dir, task_id))
+    logger.debug(f"Фоновая задача загрузки создана: {task_id}")
 
     message = "✅ Фоновая загрузка запущена!\n\n"
     message += f"📋 ID задачи загрузки: {task_id}\n"
@@ -620,6 +674,8 @@ async def download_result(task_uuid: str, output_dir: Optional[str] = None) -> s
         либо сообщение об ошибке.
     """
     try:
+        logger.info(f"Синхронная загрузка результатов для task_uuid={task_uuid}")
+        logger.debug(f"Output directory: {output_dir or 'current directory'}")
         # Получаем список файлов для загрузки
         result = await make_rodin_request(
             endpoint="/download",
@@ -700,6 +756,22 @@ async def download_result(task_uuid: str, output_dir: Optional[str] = None) -> s
 
 def main():
     """Точка входа для запуска MCP сервера"""
+    # Парсим аргументы командной строки
+    parser = argparse.ArgumentParser(
+        description='Rodin Gen-2 MCP сервер для генерации 3D моделей'
+    )
+    parser.add_argument(
+        '--log-file',
+        type=str,
+        help='Путь к файлу для записи детальных логов (например, rodin_server.log)'
+    )
+    
+    args = parser.parse_args()
+    
+    # Настраиваем логирование в файл, если указан
+    if args.log_file:
+        setup_logging(args.log_file)
+    
     logger.info("Запуск Rodin Gen-2 MCP сервера...")
     
     # Проверяем наличие API ключа
@@ -708,6 +780,10 @@ def main():
             "RODIN_API_KEY не установлен! "
             "Пожалуйста, создайте .env файл с RODIN_API_KEY=your_api_key"
         )
+    else:
+        logger.debug(f"RODIN_API_KEY настроен (length={len(RODIN_API_KEY)})")
+    
+    logger.debug(f"API Base URL: {RODIN_API_BASE_URL}")
     
     # Запускаем сервер
     mcp.run()
