@@ -60,21 +60,36 @@ def setup_logging(log_file: Optional[str] = None) -> None:
 download_tasks: dict[str, dict[str, Any]] = {}
 download_tasks_lock: Optional[asyncio.Lock] = None
 download_semaphore: Optional[asyncio.Semaphore] = None
+download_tasks_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 def get_download_lock() -> asyncio.Lock:
     """Получает или создаёт Lock для текущего event loop"""
-    global download_tasks_lock
-    if download_tasks_lock is None:
+    global download_tasks_lock, download_tasks_loop
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        raise RuntimeError("get_download_lock() must be called from running event loop")
+    
+    # Пересоздаем Lock, если он не существует или создан для другого loop
+    if download_tasks_lock is None or download_tasks_loop is not current_loop:
         download_tasks_lock = asyncio.Lock()
+        download_tasks_loop = current_loop
     return download_tasks_lock
 
 
 def get_download_semaphore() -> asyncio.Semaphore:
     """Получает или создаёт Semaphore для текущего event loop"""
-    global download_semaphore
-    if download_semaphore is None:
+    global download_semaphore, download_tasks_loop
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        raise RuntimeError("get_download_semaphore() must be called from running event loop")
+    
+    # Пересоздаем Semaphore, если он не существует или создан для другого loop
+    if download_semaphore is None or download_tasks_loop is not current_loop:
         download_semaphore = asyncio.Semaphore(5)  # Максимум 5 одновременные загрузки
+        download_tasks_loop = current_loop
     return download_semaphore
 
 
