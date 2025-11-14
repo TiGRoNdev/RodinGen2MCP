@@ -402,7 +402,8 @@ async def _download_result_background(task_uuid: str, output_dir: Optional[str],
                 output_dir = "."
 
             output_directory = Path(output_dir)
-            output_directory.mkdir(parents=True, exist_ok=True)
+            # Используем asyncio.to_thread для синхронной операции mkdir
+            await asyncio.to_thread(output_directory.mkdir, parents=True, exist_ok=True)
 
             downloaded_files: list[dict[str, Any]] = []
             total_size = 0
@@ -428,26 +429,25 @@ async def _download_result_background(task_uuid: str, output_dir: Optional[str],
                         logger.info(f"[{idx}/{len(file_list)}] Начинаю загрузку: {file_name}")
                         
                         # Потоковая загрузка вместо загрузки всего файла в память
+                        downloaded_bytes = 0
                         async with client.stream('GET', file_url) as response:
                             response.raise_for_status()
                             async with aiofiles.open(output_file, 'wb') as f:
-                                downloaded_bytes = 0
                                 async for chunk in response.aiter_bytes(chunk_size=65536):  # 64KB chunks
                                     await f.write(chunk)
                                     downloaded_bytes += len(chunk)
-                                    
-                                    # Логируем прогресс каждые 10MB
-                                    if downloaded_bytes % (10 * 1024 * 1024) < 65536:
-                                        logger.info(f"  Загружено {downloaded_bytes / (1024*1024):.1f} MB...")
 
-                        file_size = output_file.stat().st_size
+                        # Используем asyncio.to_thread для синхронной операции stat()
+                        file_size = await asyncio.to_thread(lambda: output_file.stat().st_size)
                         total_size += file_size
                         size_mb = file_size / (1024 * 1024)
 
+                        # Используем asyncio.to_thread для absolute()
+                        file_path = await asyncio.to_thread(lambda: str(output_file.absolute()))
                         downloaded_files.append(
                             {
                                 "name": file_name,
-                                "path": str(output_file.absolute()),
+                                "path": file_path,
                                 "size_mb": round(size_mb, 2),
                             }
                         )
@@ -463,13 +463,16 @@ async def _download_result_background(task_uuid: str, output_dir: Optional[str],
             
             logger.info(f"Загрузка завершена: {len(downloaded_files)} успешно, {len(failed_files)} ошибок")
 
+            # Используем asyncio.to_thread для absolute()
+            output_dir_abs = await asyncio.to_thread(lambda: str(output_directory.absolute()))
+            
             async with download_tasks_lock:
                 task_info = download_tasks.get(task_id)
                 if task_info is not None:
                     task_info["status"] = "completed" if not failed_files else "completed_with_errors"
                     task_info["files"] = downloaded_files
                     task_info["failed_files"] = failed_files
-                    task_info["output_dir"] = str(output_directory.absolute())
+                    task_info["output_dir"] = output_dir_abs
                     task_info["total_size_mb"] = round(total_size_mb, 2)
 
         except Exception as e:
@@ -620,13 +623,14 @@ async def download_result(task_uuid: str, output_dir: Optional[str] = None) -> s
             output_dir = "."
         
         output_directory = Path(output_dir)
-        output_directory.mkdir(parents=True, exist_ok=True)
+        # Используем asyncio.to_thread для синхронной операции mkdir
+        await asyncio.to_thread(output_directory.mkdir, parents=True, exist_ok=True)
         
         downloaded_files = []
         total_size = 0
         
         # Загружаем каждый файл
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, read=300.0)) as client:
             for file_info in file_list:
                 file_url = file_info.get("url")
                 file_name = file_info.get("name", "unnamed_file")
@@ -638,19 +642,24 @@ async def download_result(task_uuid: str, output_dir: Optional[str] = None) -> s
                 output_file = output_directory / file_name
                 
                 logger.info(f"Загрузка файла: {file_name}")
-                response = await client.get(file_url)
-                response.raise_for_status()
                 
-                async with aiofiles.open(output_file, 'wb') as f:
-                    await f.write(response.content)
+                # Потоковая загрузка
+                async with client.stream('GET', file_url) as response:
+                    response.raise_for_status()
+                    async with aiofiles.open(output_file, 'wb') as f:
+                        async for chunk in response.aiter_bytes(chunk_size=65536):
+                            await f.write(chunk)
                 
-                file_size = output_file.stat().st_size
+                # Используем asyncio.to_thread для синхронной операции stat()
+                file_size = await asyncio.to_thread(lambda: output_file.stat().st_size)
                 total_size += file_size
                 size_mb = file_size / (1024 * 1024)
                 
+                # Используем asyncio.to_thread для absolute()
+                file_path = await asyncio.to_thread(lambda: str(output_file.absolute()))
                 downloaded_files.append({
                     "name": file_name,
-                    "path": str(output_file.absolute()),
+                    "path": file_path,
                     "size_mb": round(size_mb, 2)
                 })
                 
@@ -658,8 +667,10 @@ async def download_result(task_uuid: str, output_dir: Optional[str] = None) -> s
         
         # Формируем сообщение о результате
         total_size_mb = total_size / (1024 * 1024)
+        # Используем asyncio.to_thread для absolute()
+        output_dir_abs = await asyncio.to_thread(lambda: output_directory.absolute())
         message = f"✅ Успешно загружено {len(downloaded_files)} файл(ов)!\n\n"
-        message += f"📁 Директория: {output_directory.absolute()}\n"
+        message += f"📁 Директория: {output_dir_abs}\n"
         message += f"💾 Общий размер: {total_size_mb:.2f} MB\n\n"
         message += "📄 Загруженные файлы:\n"
         
