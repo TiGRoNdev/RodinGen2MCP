@@ -394,9 +394,9 @@ async def _download_result_background(task_uuid: str, output_dir: Optional[str],
             if not file_list:
                 raise Exception("Список файлов пуст. Возможно, задача еще не завершена.")
 
-            logger.info(f"Получен список файлов для загрузки: {len(file_list)} файл(ов)")
-            for idx, file_info in enumerate(file_list, 1):
-                logger.info(f"  {idx}. {file_info.get('name', 'unnamed')} - URL: {file_info.get('url', 'no URL')[:50]}...")
+            logger.info(f"Получен список из {len(file_list)} файл(ов) для загрузки")
+            # Даём контроль event loop после логирования
+            await asyncio.sleep(0)
 
             if output_dir is None:
                 output_dir = "."
@@ -426,16 +426,17 @@ async def _download_result_background(task_uuid: str, output_dir: Optional[str],
                     output_file = output_directory / file_name
 
                     try:
-                        logger.info(f"[{idx}/{len(file_list)}] Начинаю загрузку: {file_name}")
-                        
                         # Потоковая загрузка вместо загрузки всего файла в память
-                        downloaded_bytes = 0
                         async with client.stream('GET', file_url) as response:
                             response.raise_for_status()
                             async with aiofiles.open(output_file, 'wb') as f:
+                                chunk_count = 0
                                 async for chunk in response.aiter_bytes(chunk_size=65536):  # 64KB chunks
                                     await f.write(chunk)
-                                    downloaded_bytes += len(chunk)
+                                    chunk_count += 1
+                                    # Даём контроль event loop каждые 100 чанков (~6.4MB)
+                                    if chunk_count % 100 == 0:
+                                        await asyncio.sleep(0)
 
                         # Используем asyncio.to_thread для синхронной операции stat()
                         file_size = await asyncio.to_thread(lambda: output_file.stat().st_size)
@@ -451,20 +452,22 @@ async def _download_result_background(task_uuid: str, output_dir: Optional[str],
                                 "size_mb": round(size_mb, 2),
                             }
                         )
-
-                        logger.info(f"[{idx}/{len(file_list)}] ✅ Файл загружен: {file_name} ({size_mb:.2f} MB)")
+                        # Даём контроль event loop после загрузки файла
+                        await asyncio.sleep(0)
                     
                     except Exception as file_error:
-                        logger.error(f"[{idx}/{len(file_list)}] ❌ Ошибка при загрузке файла {file_name}: {str(file_error)}")
-                        failed_files.append(f"{file_name} ({str(file_error)})")
-                        # Продолжаем загрузку остальных файлов
+                        logger.error(f"❌ Ошибка при загрузке {file_name}: {str(file_error)[:100]}")
+                        failed_files.append(f"{file_name} ({str(file_error)[:50]})")
+                        # Даём контроль event loop после ошибки
+                        await asyncio.sleep(0)
 
             total_size_mb = total_size / (1024 * 1024)
             
-            logger.info(f"Загрузка завершена: {len(downloaded_files)} успешно, {len(failed_files)} ошибок")
-
             # Используем asyncio.to_thread для absolute()
             output_dir_abs = await asyncio.to_thread(lambda: str(output_directory.absolute()))
+            
+            logger.info(f"✅ Загрузка завершена: {len(downloaded_files)}/{len(file_list)} файлов, {total_size_mb:.1f}MB")
+            await asyncio.sleep(0)
             
             async with download_tasks_lock:
                 task_info = download_tasks.get(task_id)
