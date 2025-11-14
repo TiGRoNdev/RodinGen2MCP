@@ -47,7 +47,7 @@ jobs:
 
     environment:
       name: pypi
-      url: https://pypi.org/p/rodin-gen2
+      url: https://pypi.org/p/rodin-gen2-mcp
 
     permissions:
       id-token: write
@@ -70,7 +70,7 @@ jobs:
 
     environment:
       name: testpypi
-      url: https://test.pypi.org/p/rodin-gen2
+      url: https://test.pypi.org/p/rodin-gen2-mcp
 
     permissions:
       id-token: write
