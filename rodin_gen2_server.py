@@ -7,6 +7,7 @@ MCP Server для Rodin Gen-2 API
 import os
 import logging
 import asyncio
+import uuid
 from typing import Any, Optional
 from pathlib import Path
 
@@ -25,6 +26,9 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
+
+download_tasks: dict[str, dict[str, Any]] = {}
+download_tasks_lock = asyncio.Lock()
 
 # Инициализация FastMCP сервера
 mcp = FastMCP("rodin-gen2")
@@ -167,10 +171,13 @@ async def generate_3d_text_to_3d(
         
         if subscription_key:
             message += f"🔑 Subscription Key: {subscription_key}\n\n"
-            message += f"Используйте check_task_status с subscription_key '{subscription_key}' для проверки статуса.\n"
-            message += f"После завершения используйте download_result с UUID '{uuid}' для загрузки."
+            message += "Рекомендуемый сценарий:\n"
+            message += f"  1) Проверяйте прогресс через tool check_task_status с subscription_key '{subscription_key}'.\n"
+            message += f"  2) Когда все подзадачи в статусе done, вызовите start_download_result с UUID '{uuid}' (и при необходимости output_dir).\n"
+            message += "  3) Отслеживайте ход загрузки через check_download_result_status по ID задачи загрузки.\n\n"
+            message += "Альтернатива: можно использовать download_result с UUID задачи, но этот инструмент выполняет загрузку синхронно и может занимать больше времени."
         else:
-            message += f"\n⚠️ Внимание: subscription_key не найден в ответе API."
+            message += f"\n⚠️ Внимание: subscription_key не найден в ответе API. Вы сможете сразу вызвать start_download_result с UUID задачи для загрузки результата."
         
         return message
         
@@ -289,10 +296,13 @@ async def generate_3d_image_to_3d(
         
         if subscription_key:
             message += f"🔑 Subscription Key: {subscription_key}\n\n"
-            message += f"Используйте check_task_status с subscription_key '{subscription_key}' для проверки статуса.\n"
-            message += f"После завершения используйте download_result с UUID '{uuid}' для загрузки."
+            message += "Рекомендуемый сценарий:\n"
+            message += f"  1) Проверяйте прогресс через tool check_task_status с subscription_key '{subscription_key}'.\n"
+            message += f"  2) Когда все подзадачи в статусе done, вызовите start_download_result с UUID '{uuid}' (и при необходимости output_dir).\n"
+            message += "  3) Отслеживайте ход загрузки через check_download_result_status по ID задачи загрузки.\n\n"
+            message += "Альтернатива: можно использовать download_result с UUID задачи, но этот инструмент выполняет загрузку синхронно и может занимать больше времени."
         else:
-            message += f"\n⚠️ Внимание: subscription_key не найден в ответе API."
+            message += f"\n⚠️ Внимание: subscription_key не найден в ответе API. Вы сможете сразу вызвать start_download_result с UUID задачи для загрузки результата."
         
         return message
         
@@ -319,7 +329,7 @@ async def check_task_status(subscription_key: str) -> str:
             endpoint="/status",
             method="POST",
             data={"subscription_key": subscription_key},
-            timeout=30.0
+            timeout=5.0
         )
         
         jobs = result.get("jobs", [])
@@ -362,6 +372,148 @@ async def check_task_status(subscription_key: str) -> str:
         return f"❌ Ошибка при проверке статуса: {str(e)}"
 
 
+async def _download_result_background(task_uuid: str, output_dir: Optional[str], task_id: str) -> None:
+    try:
+        async with download_tasks_lock:
+            task_info = download_tasks.get(task_id)
+            if task_info is not None:
+                task_info["status"] = "running"
+
+        result = await make_rodin_request(
+            endpoint="/download",
+            method="POST",
+            data={"task_uuid": task_uuid},
+            timeout=5.0
+        )
+
+        file_list = result.get("list", [])
+
+        if not file_list:
+            raise Exception("Список файлов пуст. Возможно, задача еще не завершена.")
+
+        if output_dir is None:
+            output_dir = "."
+
+        output_directory = Path(output_dir)
+        output_directory.mkdir(parents=True, exist_ok=True)
+
+        downloaded_files: list[dict[str, Any]] = []
+        total_size = 0
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            for file_info in file_list:
+                file_url = file_info.get("url")
+                file_name = file_info.get("name", "unnamed_file")
+
+                if not file_url:
+                    logger.warning(f"Пропущен файл без URL: {file_name}")
+                    continue
+
+                output_file = output_directory / file_name
+
+                logger.info(f"Загрузка файла: {file_name}")
+                response = await client.get(file_url)
+                response.raise_for_status()
+
+                async with aiofiles.open(output_file, 'wb') as f:
+                    await f.write(response.content)
+
+                file_size = output_file.stat().st_size
+                total_size += file_size
+                size_mb = file_size / (1024 * 1024)
+
+                downloaded_files.append(
+                    {
+                        "name": file_name,
+                        "path": str(output_file.absolute()),
+                        "size_mb": round(size_mb, 2),
+                    }
+                )
+
+                logger.info(f"Файл загружен: {output_file} ({size_mb:.2f} MB)")
+
+        total_size_mb = total_size / (1024 * 1024)
+
+        async with download_tasks_lock:
+            task_info = download_tasks.get(task_id)
+            if task_info is not None:
+                task_info["status"] = "completed"
+                task_info["files"] = downloaded_files
+                task_info["output_dir"] = str(output_directory.absolute())
+                task_info["total_size_mb"] = round(total_size_mb, 2)
+
+    except Exception as e:
+        logger.error(f"Ошибка при фоновой загрузке результата: {str(e)}")
+        async with download_tasks_lock:
+            task_info = download_tasks.get(task_id)
+            if task_info is not None:
+                task_info["status"] = "failed"
+                task_info["error"] = str(e)
+
+
+@mcp.tool()
+async def start_download_result(task_uuid: str, output_dir: Optional[str] = None) -> str:
+    logger.info(f"Запуск фоновой загрузки результата задачи: {task_uuid}")
+
+    task_id = str(uuid.uuid4())
+
+    async with download_tasks_lock:
+        download_tasks[task_id] = {
+            "status": "pending",
+            "error": None,
+            "files": [],
+            "output_dir": output_dir,
+            "total_size_mb": 0.0,
+            "task_uuid": task_uuid,
+        }
+
+    asyncio.create_task(_download_result_background(task_uuid, output_dir, task_id))
+
+    message = "✅ Фоновая загрузка запущена!\n\n"
+    message += f"📋 ID задачи загрузки: {task_id}\n"
+    message += "Используйте check_download_result_status с этим ID, чтобы проверить статус."
+    return message
+
+
+@mcp.tool()
+async def check_download_result_status(task_id: str) -> str:
+    async with download_tasks_lock:
+        task_info = download_tasks.get(task_id)
+
+    if not task_info:
+        return "❌ Задача загрузки не найдена."
+
+    status = task_info.get("status", "unknown")
+
+    if status == "pending":
+        return "⏳ Задача загрузки поставлена в очередь."
+    if status == "running":
+        return "🔄 Загрузка результата выполняется."
+    if status == "failed":
+        error = task_info.get("error") or "Неизвестная ошибка"
+        return f"❌ Задача загрузки завершилась с ошибкой: {error}"
+    if status != "completed":
+        return f"❓ Неизвестный статус задачи: {status}"
+
+    message = "✅ Загрузка результата завершена!\n\n"
+    output_dir = task_info.get("output_dir")
+    total_size_mb = task_info.get("total_size_mb", 0.0)
+
+    if output_dir:
+        message += f"📁 Директория: {output_dir}\n"
+    message += f"💾 Общий размер: {total_size_mb:.2f} MB\n\n"
+
+    files = task_info.get("files") or []
+    if files:
+        message += "📄 Загруженные файлы:\n"
+        for file_info in files:
+            name = file_info.get("name", "unknown")
+            size_mb = file_info.get("size_mb", 0.0)
+            message += f"  • {name} ({size_mb} MB)\n"
+
+    return message
+
+
 @mcp.tool()
 async def download_result(task_uuid: str, output_dir: Optional[str] = None) -> str:
     """
@@ -382,7 +534,7 @@ async def download_result(task_uuid: str, output_dir: Optional[str] = None) -> s
             endpoint="/download",
             method="POST",
             data={"task_uuid": task_uuid},
-            timeout=30.0
+            timeout=5.0
         )
         
         file_list = result.get("list", [])
@@ -401,7 +553,7 @@ async def download_result(task_uuid: str, output_dir: Optional[str] = None) -> s
         total_size = 0
         
         # Загружаем каждый файл
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             for file_info in file_list:
                 file_url = file_info.get("url")
                 file_name = file_info.get("name", "unnamed_file")
