@@ -19,7 +19,7 @@ MCP (Model Context Protocol) сервер для интеграции с Rodin G
 
 ## Установка
 
-### Вариант 1: Использование uv (рекомендуется)
+#### Вариант 1: Использование uv (рекомендуется)
 
 1. Установите `uv`:
 
@@ -31,95 +31,23 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-2. Клонируйте репозиторий:
-
-```bash
-git clone <repository-url>
-cd windsurf-project
-```
-
-3. Установите зависимости:
-
-```bash
-uv venv
-uv pip install -r requirements.txt
-```
-
-### Вариант 2: Использование pip
-
-```bash
-pip install -r requirements.txt
-```
-
-## Настройка
-
-1. Создайте `.env` файл:
-
-```bash
-cp .env.example .env
-```
-
-2. Добавьте ваш API ключ в `.env`:
-
-```
-RODIN_API_KEY=your_rodin_api_key_here
-```
-
 ## Использование
 
-### Запуск сервера напрямую
-
-```bash
-python rodin_gen2_server.py
-```
-
-### Запуск через uvx
-
-```bash
-uvx --from . rodin-gen2-mcp
-```
-
-### Интеграция с Claude Desktop
-
-Добавьте в конфигурацию Claude Desktop (`claude_desktop_config.json`):
-
-**Windows:**
+Добавьте в конфигурацию любого IDE, поддерживающего MCP протокол:
 
 ```json
 {
   "mcpServers": {
-    "rodin-gen2": {
-      "command": "uv",
-      "args": [
-        "--directory",
-        "C:\\Users\\tigro\\CascadeProjects\\windsurf-project",
-        "run",
-        "rodin_gen2_server.py"
-      ]
+    "rodin-gen2-mcp": {
+      "command": "uvx",
+      "args": ["rodin-gen2-mcp"],
+      "env": {
+        "RODIN_API_KEY": "your_api_key_here"
+      }
     }
   }
 }
 ```
-
-**macOS/Linux:**
-
-```json
-{
-  "mcpServers": {
-    "rodin-gen2": {
-      "command": "uv",
-      "args": [
-        "--directory",
-        "/absolute/path/to/windsurf-project",
-        "run",
-        "rodin_gen2_server.py"
-      ]
-    }
-  }
-}
-```
-
-После добавления перезапустите Claude Desktop.
 
 ## Доступные инструменты
 
