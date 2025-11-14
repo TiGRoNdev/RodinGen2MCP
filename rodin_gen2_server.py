@@ -74,7 +74,7 @@ def get_download_semaphore() -> asyncio.Semaphore:
     """Получает или создаёт Semaphore для текущего event loop"""
     global download_semaphore
     if download_semaphore is None:
-        download_semaphore = asyncio.Semaphore(1)  # Максимум 1 одновременная загрузка
+        download_semaphore = asyncio.Semaphore(5)  # Максимум 5 одновременные загрузки
     return download_semaphore
 
 
@@ -152,8 +152,13 @@ async def make_rodin_request(
             error_detail = e.response.text
             logger.error(f"HTTP ошибка {e.response.status_code}: {error_detail}")
             raise Exception(f"Rodin API ошибка ({e.response.status_code}): {error_detail}")
+        except httpx.TimeoutException as e:
+            elapsed_time = time.time() - start_time
+            logger.error(f"Таймаут запроса после {elapsed_time:.2f}s: {str(e)}")
+            raise Exception(f"Таймаут при обращении к Rodin API (>{timeout}s): {str(e)}")
         except httpx.RequestError as e:
-            logger.error(f"Ошибка запроса: {str(e)}")
+            elapsed_time = time.time() - start_time
+            logger.error(f"Ошибка запроса после {elapsed_time:.2f}s: {str(e)}")
             raise Exception(f"Ошибка сети при обращении к Rodin API: {str(e)}")
         except Exception as e:
             logger.error(f"Неожиданная ошибка: {str(e)}")
@@ -453,7 +458,7 @@ async def _download_result_background(task_uuid: str, output_dir: Optional[str],
                 endpoint="/download",
                 method="POST",
                 data={"task_uuid": task_uuid},
-                timeout=5.0
+                timeout=30.0  # Увеличен таймаут для медленных API ответов
             )
 
             file_list = result.get("list", [])
