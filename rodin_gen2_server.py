@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 download_tasks: dict[str, dict[str, Any]] = {}
 download_tasks_lock = asyncio.Lock()
-download_semaphore = asyncio.Semaphore(1)  # Максимум 1 одновременная загрузка
+download_semaphore = asyncio.Semaphore(5)  # Максимум 5 одновременных загрузок
 
 # Инициализация FastMCP сервера
 mcp = FastMCP("rodin-gen2")
