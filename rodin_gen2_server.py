@@ -30,7 +30,6 @@ logger = logging.getLogger(__name__)
 download_tasks: dict[str, dict[str, Any]] = {}
 download_tasks_lock = asyncio.Lock()
 download_semaphore = asyncio.Semaphore(1)  # Максимум 1 одновременная загрузка
-shared_http_client: Optional[httpx.AsyncClient] = None
 
 # Инициализация FastMCP сервера
 mcp = FastMCP("rodin-gen2")
@@ -395,6 +394,10 @@ async def _download_result_background(task_uuid: str, output_dir: Optional[str],
             if not file_list:
                 raise Exception("Список файлов пуст. Возможно, задача еще не завершена.")
 
+            logger.info(f"Получен список файлов для загрузки: {len(file_list)} файл(ов)")
+            for idx, file_info in enumerate(file_list, 1):
+                logger.info(f"  {idx}. {file_info.get('name', 'unnamed')} - URL: {file_info.get('url', 'no URL')[:50]}...")
+
             if output_dir is None:
                 output_dir = "."
 
@@ -403,54 +406,69 @@ async def _download_result_background(task_uuid: str, output_dir: Optional[str],
 
             downloaded_files: list[dict[str, Any]] = []
             total_size = 0
+            failed_files: list[str] = []
 
-            # Используем глобальный HTTP клиент или создаем новый
-            global shared_http_client
-            if shared_http_client is None:
-                shared_http_client = httpx.AsyncClient(timeout=60.0, limits=httpx.Limits(max_connections=10))
-            
-            client = shared_http_client
-            
-            for file_info in file_list:
-                file_url = file_info.get("url")
-                file_name = file_info.get("name", "unnamed_file")
+            # Создаем отдельный HTTP клиент для этой задачи
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(120.0, read=300.0),  # Увеличенный timeout для больших файлов
+                limits=httpx.Limits(max_connections=5, max_keepalive_connections=2)
+            ) as client:
+                for idx, file_info in enumerate(file_list, 1):
+                    file_url = file_info.get("url")
+                    file_name = file_info.get("name", "unnamed_file")
 
-                if not file_url:
-                    logger.warning(f"Пропущен файл без URL: {file_name}")
-                    continue
+                    if not file_url:
+                        logger.warning(f"[{idx}/{len(file_list)}] Пропущен файл без URL: {file_name}")
+                        failed_files.append(f"{file_name} (нет URL)")
+                        continue
 
-                output_file = output_directory / file_name
+                    output_file = output_directory / file_name
 
-                logger.info(f"Загрузка файла: {file_name}")
-                
-                # Потоковая загрузка вместо загрузки всего файла в память
-                async with client.stream('GET', file_url) as response:
-                    response.raise_for_status()
-                    async with aiofiles.open(output_file, 'wb') as f:
-                        async for chunk in response.aiter_bytes(chunk_size=8192):
-                            await f.write(chunk)
+                    try:
+                        logger.info(f"[{idx}/{len(file_list)}] Начинаю загрузку: {file_name}")
+                        
+                        # Потоковая загрузка вместо загрузки всего файла в память
+                        async with client.stream('GET', file_url) as response:
+                            response.raise_for_status()
+                            async with aiofiles.open(output_file, 'wb') as f:
+                                downloaded_bytes = 0
+                                async for chunk in response.aiter_bytes(chunk_size=65536):  # 64KB chunks
+                                    await f.write(chunk)
+                                    downloaded_bytes += len(chunk)
+                                    
+                                    # Логируем прогресс каждые 10MB
+                                    if downloaded_bytes % (10 * 1024 * 1024) < 65536:
+                                        logger.info(f"  Загружено {downloaded_bytes / (1024*1024):.1f} MB...")
 
-                file_size = output_file.stat().st_size
-                total_size += file_size
-                size_mb = file_size / (1024 * 1024)
+                        file_size = output_file.stat().st_size
+                        total_size += file_size
+                        size_mb = file_size / (1024 * 1024)
 
-                downloaded_files.append(
-                    {
-                        "name": file_name,
-                        "path": str(output_file.absolute()),
-                        "size_mb": round(size_mb, 2),
-                    }
-                )
+                        downloaded_files.append(
+                            {
+                                "name": file_name,
+                                "path": str(output_file.absolute()),
+                                "size_mb": round(size_mb, 2),
+                            }
+                        )
 
-                logger.info(f"Файл загружен: {output_file} ({size_mb:.2f} MB)")
+                        logger.info(f"[{idx}/{len(file_list)}] ✅ Файл загружен: {file_name} ({size_mb:.2f} MB)")
+                    
+                    except Exception as file_error:
+                        logger.error(f"[{idx}/{len(file_list)}] ❌ Ошибка при загрузке файла {file_name}: {str(file_error)}")
+                        failed_files.append(f"{file_name} ({str(file_error)})")
+                        # Продолжаем загрузку остальных файлов
 
             total_size_mb = total_size / (1024 * 1024)
+            
+            logger.info(f"Загрузка завершена: {len(downloaded_files)} успешно, {len(failed_files)} ошибок")
 
             async with download_tasks_lock:
                 task_info = download_tasks.get(task_id)
                 if task_info is not None:
-                    task_info["status"] = "completed"
+                    task_info["status"] = "completed" if not failed_files else "completed_with_errors"
                     task_info["files"] = downloaded_files
+                    task_info["failed_files"] = failed_files
                     task_info["output_dir"] = str(output_directory.absolute())
                     task_info["total_size_mb"] = round(total_size_mb, 2)
 
@@ -525,16 +543,22 @@ async def check_download_result_status(task_id: str) -> str:
     status = task_info.get("status", "unknown")
 
     if status == "pending":
-        return "⏳ Задача загрузки поставлена в очередь (ожидает слота для загрузки, максимум 3 одновременных)."
+        return "⏳ Задача загрузки поставлена в очередь (ожидает слота для загрузки, максимум 1 одновременная)."
     if status == "running":
         return "🔄 Загрузка результата выполняется."
     if status == "failed":
         error = task_info.get("error") or "Неизвестная ошибка"
         return f"❌ Задача загрузки завершилась с ошибкой: {error}"
-    if status != "completed":
+    if status not in ["completed", "completed_with_errors"]:
         return f"❓ Неизвестный статус задачи: {status}"
 
-    message = "✅ Загрузка результата завершена!\n\n"
+    failed_files = task_info.get("failed_files", [])
+    
+    if status == "completed_with_errors":
+        message = "⚠️ Загрузка завершена с ошибками!\n\n"
+    else:
+        message = "✅ Загрузка результата завершена!\n\n"
+    
     output_dir = task_info.get("output_dir")
     total_size_mb = task_info.get("total_size_mb", 0.0)
 
@@ -544,11 +568,16 @@ async def check_download_result_status(task_id: str) -> str:
 
     files = task_info.get("files") or []
     if files:
-        message += "📄 Загруженные файлы:\n"
+        message += f"✅ Успешно загружено ({len(files)} файл(ов)):\n"
         for file_info in files:
             name = file_info.get("name", "unknown")
             size_mb = file_info.get("size_mb", 0.0)
             message += f"  • {name} ({size_mb} MB)\n"
+    
+    if failed_files:
+        message += f"\n❌ Не удалось загрузить ({len(failed_files)} файл(ов)):\n"
+        for failed_file in failed_files:
+            message += f"  • {failed_file}\n"
 
     return message
 
