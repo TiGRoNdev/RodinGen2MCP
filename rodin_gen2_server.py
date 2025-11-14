@@ -453,6 +453,21 @@ async def _download_result_background(task_uuid: str, output_dir: Optional[str],
 
 @mcp.tool()
 async def start_download_result(task_uuid: str, output_dir: Optional[str] = None) -> str:
+    """
+    Запускает фоновую загрузку результатов 3D-задачи по её UUID.
+
+    Предназначен для LLM-агентов:
+      1. Вызывается после того, как генерация завершена (см. check_task_status).
+      2. Не блокирует диалог — только стартует фоновую загрузку.
+      3. Возвращает идентификатор task_id, который нужно передать в check_download_result_status.
+
+    Args:
+        task_uuid: UUID задачи из generate_3d_* (поле uuid, не subscription_key).
+        output_dir: Папка для сохранения файлов; по умолчанию — текущая директория.
+
+    Returns:
+        Человекочитаемое сообщение с task_id фоновой задачи загрузки.
+    """
     logger.info(f"Запуск фоновой загрузки результата задачи: {task_uuid}")
 
     task_id = str(uuid.uuid4())
@@ -477,6 +492,18 @@ async def start_download_result(task_uuid: str, output_dir: Optional[str] = None
 
 @mcp.tool()
 async def check_download_result_status(task_id: str) -> str:
+    """
+    Проверяет прогресс фоновой загрузки, запущенной start_download_result.
+
+    Удобен для LLM: его можно вызывать периодически, чтобы отслеживать статус
+    фоновой загрузки без долгих блокировок одного запроса.
+
+    Args:
+        task_id: Идентификатор задачи загрузки, полученный из start_download_result.
+
+    Returns:
+        Человекочитаемое сообщение со статусом задачи и, при завершении, списком файлов.
+    """
     async with download_tasks_lock:
         task_info = download_tasks.get(task_id)
 
@@ -517,14 +544,19 @@ async def check_download_result_status(task_id: str) -> str:
 @mcp.tool()
 async def download_result(task_uuid: str, output_dir: Optional[str] = None) -> str:
     """
-    Загружает результаты генерации 3D модели
-    
+    Синхронно загружает результаты генерации 3D модели по UUID задачи.
+
+    Этот инструмент блокирующий: LLM дожидается завершения загрузки в рамках одного вызова.
+    Обычно предпочтительнее использовать пару start_download_result + check_download_result_status,
+    но download_result удобен для простых сценариев и небольших объёмов данных.
+
     Args:
-        task_uuid: UUID задачи (получается из generate_3d_* как uuid, не subscription_key)
-        output_dir: Директория для сохранения файлов. Если не указана, используется текущая директория
-        
+        task_uuid: UUID задачи из generate_3d_* (поле uuid, не subscription_key).
+        output_dir: Папка для сохранения файлов; по умолчанию — текущая директория.
+
     Returns:
-        Информация о загруженных файлах или сообщение об ошибке
+        Человекочитаемое сообщение с директорией, суммарным размером и списком загруженных файлов
+        либо сообщение об ошибке.
     """
     logger.info(f"Загрузка результата задачи: {task_uuid}")
     
