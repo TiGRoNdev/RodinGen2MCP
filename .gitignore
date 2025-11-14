@@ -1,0 +1,5 @@
+.env
+*env*
+uv.lock
+venv
+.venv
