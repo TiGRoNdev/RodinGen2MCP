@@ -126,8 +126,6 @@ async def generate_3d_text_to_3d(
     Returns:
         UUID задачи для проверки статуса и загрузки результата
     """
-    logger.info(f"Запуск Text-to-3D генерации с промптом: {prompt}")
-    
     # Подготовка данных формы
     form_data = {
         "tier": "Gen-2",
@@ -218,8 +216,6 @@ async def generate_3d_image_to_3d(
     Returns:
         UUID задачи для проверки статуса и загрузки результата
     """
-    logger.info(f"Запуск Image-to-3D генерации с {len(image_paths)} изображением(ями)")
-    
     if not image_paths:
         return "❌ Необходимо указать хотя бы одно изображение"
     
@@ -323,8 +319,6 @@ async def check_task_status(subscription_key: str) -> str:
     Returns:
         Текущий статус всех подзадач
     """
-    logger.info(f"Проверка статуса задачи с subscription_key: {subscription_key}")
-    
     try:
         result = await make_rodin_request(
             endpoint="/status",
@@ -332,6 +326,9 @@ async def check_task_status(subscription_key: str) -> str:
             data={"subscription_key": subscription_key},
             timeout=5.0
         )
+        
+        # Даём контроль event loop после HTTP запроса
+        await asyncio.sleep(0)
         
         jobs = result.get("jobs", [])
         
@@ -353,6 +350,9 @@ async def check_task_status(subscription_key: str) -> str:
             
             message += f"{status_emoji} UUID: {uuid}\n"
             message += f"   Статус: {status}\n\n"
+            
+            # Даём контроль event loop после каждой задачи
+            await asyncio.sleep(0)
         
         # Проверяем, все ли задачи завершены
         all_done = all(job.get("status", "").lower() == "done" for job in jobs)
@@ -365,11 +365,10 @@ async def check_task_status(subscription_key: str) -> str:
         else:
             message += "🔄 Генерация в процессе. Проверьте статус позже."
         
-        logger.info(f"Проверен статус для subscription_key: {subscription_key}")
         return message
         
     except Exception as e:
-        logger.error(f"Ошибка при проверке статуса: {str(e)}")
+        logger.error(f"❌ Ошибка проверки статуса: {str(e)[:100]}")
         return f"❌ Ошибка при проверке статуса: {str(e)}"
 
 
@@ -504,8 +503,6 @@ async def start_download_result(task_uuid: str, output_dir: Optional[str] = None
     Returns:
         Человекочитаемое сообщение с task_id фоновой задачи загрузки.
     """
-    logger.info(f"Запуск фоновой загрузки результата задачи: {task_uuid}")
-
     task_id = str(uuid.uuid4())
 
     async with download_tasks_lock:
@@ -605,8 +602,6 @@ async def download_result(task_uuid: str, output_dir: Optional[str] = None) -> s
         Человекочитаемое сообщение с директорией, суммарным размером и списком загруженных файлов
         либо сообщение об ошибке.
     """
-    logger.info(f"Загрузка результата задачи: {task_uuid}")
-    
     try:
         # Получаем список файлов для загрузки
         result = await make_rodin_request(
@@ -644,8 +639,6 @@ async def download_result(task_uuid: str, output_dir: Optional[str] = None) -> s
                 
                 output_file = output_directory / file_name
                 
-                logger.info(f"Загрузка файла: {file_name}")
-                
                 # Потоковая загрузка
                 async with client.stream('GET', file_url) as response:
                     response.raise_for_status()
@@ -666,7 +659,8 @@ async def download_result(task_uuid: str, output_dir: Optional[str] = None) -> s
                     "size_mb": round(size_mb, 2)
                 })
                 
-                logger.info(f"Файл загружен: {output_file} ({size_mb:.2f} MB)")
+                # Даём контроль event loop после загрузки файла
+                await asyncio.sleep(0)
         
         # Формируем сообщение о результате
         total_size_mb = total_size / (1024 * 1024)
