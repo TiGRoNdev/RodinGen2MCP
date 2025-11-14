@@ -124,8 +124,23 @@ async def make_rodin_request(
     logger.debug(f"Начало запроса: {method} {url} (timeout={timeout}s)")
     start_time = time.time()
     
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    # Создаем детальный timeout с явным connect timeout для TLS handshake
+    timeout_config = httpx.Timeout(
+        connect=10.0,  # Таймаут на TCP + TLS соединение
+        read=timeout,   # Таймаут на чтение ответа
+        write=30.0,     # Таймаут на запись запроса
+        pool=5.0        # Таймаут на получение соединения из пула
+    )
+    
+    # Ограничиваем количество соединений для стабильности
+    limits = httpx.Limits(
+        max_connections=10,      # Максимум соединений всего
+        max_keepalive_connections=5  # Максимум keep-alive соединений
+    )
+    
+    async with httpx.AsyncClient(timeout=timeout_config, limits=limits) as client:
         try:
+            logger.debug("HTTP клиент создан, отправка запроса...")
             if method.upper() == "POST" and files:
                 # Для multipart/form-data запросов
                 logger.debug(f"POST запрос с файлами: {len(files)} файл(ов)")
@@ -138,6 +153,8 @@ async def make_rodin_request(
                 response = await client.get(url, headers=headers)
             else:
                 raise ValueError(f"Неподдерживаемый HTTP метод: {method}")
+            
+            logger.debug(f"Запрос выполнен, статус: {response.status_code}")
             
             elapsed_time = time.time() - start_time
             logger.debug(f"Ответ получен за {elapsed_time:.2f}s, status={response.status_code}")
