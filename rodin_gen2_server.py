@@ -28,8 +28,25 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 download_tasks: dict[str, dict[str, Any]] = {}
-download_tasks_lock = asyncio.Lock()
-download_semaphore = asyncio.Semaphore(5)  # Максимум 5 одновременных загрузок
+download_tasks_lock: Optional[asyncio.Lock] = None
+download_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def get_download_lock() -> asyncio.Lock:
+    """Получает или создаёт Lock для текущего event loop"""
+    global download_tasks_lock
+    if download_tasks_lock is None:
+        download_tasks_lock = asyncio.Lock()
+    return download_tasks_lock
+
+
+def get_download_semaphore() -> asyncio.Semaphore:
+    """Получает или создаёт Semaphore для текущего event loop"""
+    global download_semaphore
+    if download_semaphore is None:
+        download_semaphore = asyncio.Semaphore(1)  # Максимум 1 одновременная загрузка
+    return download_semaphore
+
 
 # Инициализация FastMCP сервера
 mcp = FastMCP("rodin-gen2")
@@ -374,9 +391,9 @@ async def check_task_status(subscription_key: str) -> str:
 
 async def _download_result_background(task_uuid: str, output_dir: Optional[str], task_id: str) -> None:
     # Ограничиваем количество одновременных загрузок через семафор
-    async with download_semaphore:
+    async with get_download_semaphore():
         try:
-            async with download_tasks_lock:
+            async with get_download_lock():
                 task_info = download_tasks.get(task_id)
                 if task_info is not None:
                     task_info["status"] = "running"
@@ -468,7 +485,7 @@ async def _download_result_background(task_uuid: str, output_dir: Optional[str],
             logger.info(f"✅ Загрузка завершена: {len(downloaded_files)}/{len(file_list)} файлов, {total_size_mb:.1f}MB")
             await asyncio.sleep(0)
             
-            async with download_tasks_lock:
+            async with get_download_lock():
                 task_info = download_tasks.get(task_id)
                 if task_info is not None:
                     task_info["status"] = "completed" if not failed_files else "completed_with_errors"
@@ -479,7 +496,7 @@ async def _download_result_background(task_uuid: str, output_dir: Optional[str],
 
         except Exception as e:
             logger.error(f"Ошибка при фоновой загрузке результата: {str(e)}")
-            async with download_tasks_lock:
+            async with get_download_lock():
                 task_info = download_tasks.get(task_id)
                 if task_info is not None:
                     task_info["status"] = "failed"
@@ -505,7 +522,7 @@ async def start_download_result(task_uuid: str, output_dir: Optional[str] = None
     """
     task_id = str(uuid.uuid4())
 
-    async with download_tasks_lock:
+    async with get_download_lock():
         download_tasks[task_id] = {
             "status": "pending",
             "error": None,
@@ -537,7 +554,7 @@ async def check_download_result_status(task_id: str) -> str:
     Returns:
         Человекочитаемое сообщение со статусом задачи и, при завершении, списком файлов.
     """
-    async with download_tasks_lock:
+    async with get_download_lock():
         task_info = download_tasks.get(task_id)
 
     if not task_info:
