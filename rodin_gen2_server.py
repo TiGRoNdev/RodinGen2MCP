@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 download_tasks: dict[str, dict[str, Any]] = {}
 download_tasks_lock = asyncio.Lock()
+download_semaphore = asyncio.Semaphore(1)  # Максимум 1 одновременная загрузка
+shared_http_client: Optional[httpx.AsyncClient] = None
 
 # Инициализация FastMCP сервера
 mcp = FastMCP("rodin-gen2")
@@ -373,34 +375,42 @@ async def check_task_status(subscription_key: str) -> str:
 
 
 async def _download_result_background(task_uuid: str, output_dir: Optional[str], task_id: str) -> None:
-    try:
-        async with download_tasks_lock:
-            task_info = download_tasks.get(task_id)
-            if task_info is not None:
-                task_info["status"] = "running"
+    # Ограничиваем количество одновременных загрузок через семафор
+    async with download_semaphore:
+        try:
+            async with download_tasks_lock:
+                task_info = download_tasks.get(task_id)
+                if task_info is not None:
+                    task_info["status"] = "running"
 
-        result = await make_rodin_request(
-            endpoint="/download",
-            method="POST",
-            data={"task_uuid": task_uuid},
-            timeout=5.0
-        )
+            result = await make_rodin_request(
+                endpoint="/download",
+                method="POST",
+                data={"task_uuid": task_uuid},
+                timeout=5.0
+            )
 
-        file_list = result.get("list", [])
+            file_list = result.get("list", [])
 
-        if not file_list:
-            raise Exception("Список файлов пуст. Возможно, задача еще не завершена.")
+            if not file_list:
+                raise Exception("Список файлов пуст. Возможно, задача еще не завершена.")
 
-        if output_dir is None:
-            output_dir = "."
+            if output_dir is None:
+                output_dir = "."
 
-        output_directory = Path(output_dir)
-        output_directory.mkdir(parents=True, exist_ok=True)
+            output_directory = Path(output_dir)
+            output_directory.mkdir(parents=True, exist_ok=True)
 
-        downloaded_files: list[dict[str, Any]] = []
-        total_size = 0
+            downloaded_files: list[dict[str, Any]] = []
+            total_size = 0
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
+            # Используем глобальный HTTP клиент или создаем новый
+            global shared_http_client
+            if shared_http_client is None:
+                shared_http_client = httpx.AsyncClient(timeout=60.0, limits=httpx.Limits(max_connections=10))
+            
+            client = shared_http_client
+            
             for file_info in file_list:
                 file_url = file_info.get("url")
                 file_name = file_info.get("name", "unnamed_file")
@@ -412,11 +422,13 @@ async def _download_result_background(task_uuid: str, output_dir: Optional[str],
                 output_file = output_directory / file_name
 
                 logger.info(f"Загрузка файла: {file_name}")
-                response = await client.get(file_url)
-                response.raise_for_status()
-
-                async with aiofiles.open(output_file, 'wb') as f:
-                    await f.write(response.content)
+                
+                # Потоковая загрузка вместо загрузки всего файла в память
+                async with client.stream('GET', file_url) as response:
+                    response.raise_for_status()
+                    async with aiofiles.open(output_file, 'wb') as f:
+                        async for chunk in response.aiter_bytes(chunk_size=8192):
+                            await f.write(chunk)
 
                 file_size = output_file.stat().st_size
                 total_size += file_size
@@ -432,23 +444,23 @@ async def _download_result_background(task_uuid: str, output_dir: Optional[str],
 
                 logger.info(f"Файл загружен: {output_file} ({size_mb:.2f} MB)")
 
-        total_size_mb = total_size / (1024 * 1024)
+            total_size_mb = total_size / (1024 * 1024)
 
-        async with download_tasks_lock:
-            task_info = download_tasks.get(task_id)
-            if task_info is not None:
-                task_info["status"] = "completed"
-                task_info["files"] = downloaded_files
-                task_info["output_dir"] = str(output_directory.absolute())
-                task_info["total_size_mb"] = round(total_size_mb, 2)
+            async with download_tasks_lock:
+                task_info = download_tasks.get(task_id)
+                if task_info is not None:
+                    task_info["status"] = "completed"
+                    task_info["files"] = downloaded_files
+                    task_info["output_dir"] = str(output_directory.absolute())
+                    task_info["total_size_mb"] = round(total_size_mb, 2)
 
-    except Exception as e:
-        logger.error(f"Ошибка при фоновой загрузке результата: {str(e)}")
-        async with download_tasks_lock:
-            task_info = download_tasks.get(task_id)
-            if task_info is not None:
-                task_info["status"] = "failed"
-                task_info["error"] = str(e)
+        except Exception as e:
+            logger.error(f"Ошибка при фоновой загрузке результата: {str(e)}")
+            async with download_tasks_lock:
+                task_info = download_tasks.get(task_id)
+                if task_info is not None:
+                    task_info["status"] = "failed"
+                    task_info["error"] = str(e)
 
 
 @mcp.tool()
@@ -513,7 +525,7 @@ async def check_download_result_status(task_id: str) -> str:
     status = task_info.get("status", "unknown")
 
     if status == "pending":
-        return "⏳ Задача загрузки поставлена в очередь."
+        return "⏳ Задача загрузки поставлена в очередь (ожидает слота для загрузки, максимум 3 одновременных)."
     if status == "running":
         return "🔄 Загрузка результата выполняется."
     if status == "failed":

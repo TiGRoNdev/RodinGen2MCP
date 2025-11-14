@@ -201,18 +201,82 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ## Разработка
 
-### Запуск тестов
+### Установка зависимостей для разработки
 
 ```bash
-pytest tests/
+pip install -e ".[dev]"
 ```
+
+### Запуск тестов
+
+Проект покрыт комплексным набором unit и integration тестов.
+
+#### Запуск всех тестов
+
+```bash
+pytest
+```
+
+#### Запуск с покрытием кода
+
+```bash
+pytest --cov=. --cov-report=html --cov-report=term
+```
+
+HTML отчет будет доступен в `htmlcov/index.html`
+
+#### Использование скрипта запуска
+
+```bash
+# Базовый запуск
+python run_tests.py
+
+# С покрытием кода
+python run_tests.py --coverage
+
+# С HTML отчетом
+python run_tests.py --coverage --html
+
+# Подробный вывод
+python run_tests.py -v
+
+# Конкретный тест
+python run_tests.py -t tests/test_main.py
+```
+
+### Покрытие кода
+
+Тесты покрывают:
+
+- ✅ FastAPI сервер (`main.py`)
+  - Все эндпоинты
+  - RodinClient класс
+  - Обработка ошибок
+  
+- ✅ MCP сервер (`rodin_gen2_server.py`)
+  - Все MCP инструменты
+  - HTTP запросы к API
+  - Валидация параметров
+  - Фоновая загрузка файлов
+  - Обработка ошибок и edge cases
+
+Подробная документация: [tests/README.md](tests/README.md)
 
 ### Форматирование кода
 
 ```bash
-black rodin_gen2_server.py
-ruff check rodin_gen2_server.py
+black rodin_gen2_server.py main.py
+ruff check rodin_gen2_server.py main.py
 ```
+
+### CI/CD
+
+Проект включает GitHub Actions workflow для автоматического запуска тестов на:
+
+- Ubuntu, Windows, macOS
+- Python 3.10, 3.11, 3.12
+
+См. [.github/workflows/tests.yml](.github/workflows/tests.yml)
 
 ## Ссылки
 
