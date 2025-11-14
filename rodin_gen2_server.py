@@ -471,12 +471,20 @@ async def _download_result_background(task_uuid: str, output_dir: Optional[str],
                     task_info["status"] = "running"
             
             logger.debug(f"Запрашиваем список файлов для task_uuid={task_uuid}")
-            result = await make_rodin_request(
-                endpoint="/download",
-                method="POST",
-                data={"task_uuid": task_uuid},
-                timeout=30.0  # Увеличен таймаут для медленных API ответов
-            )
+            # Используем asyncio.wait_for для гарантированного таймаута на уровне asyncio
+            # Это надёжнее работает на Windows с IocpProactor
+            try:
+                result = await asyncio.wait_for(
+                    make_rodin_request(
+                        endpoint="/download",
+                        method="POST",
+                        data={"task_uuid": task_uuid},
+                        timeout=30.0
+                    ),
+                    timeout=15.0  # Жёсткий таймаут 15 секунд для всей операции
+                )
+            except asyncio.TimeoutError:
+                raise Exception(f"Таймаут при запросе списка файлов (>15s). API не отвечает или медленное соединение.")
 
             file_list = result.get("list", [])
 
@@ -699,12 +707,18 @@ async def download_result(task_uuid: str, output_dir: Optional[str] = None) -> s
         logger.info(f"Синхронная загрузка результатов для task_uuid={task_uuid}")
         logger.debug(f"Output directory: {output_dir or 'current directory'}")
         # Получаем список файлов для загрузки
-        result = await make_rodin_request(
-            endpoint="/download",
-            method="POST",
-            data={"task_uuid": task_uuid},
-            timeout=5.0
-        )
+        try:
+            result = await asyncio.wait_for(
+                make_rodin_request(
+                    endpoint="/download",
+                    method="POST",
+                    data={"task_uuid": task_uuid},
+                    timeout=30.0
+                ),
+                timeout=15.0  # Жёсткий таймаут 15 секунд
+            )
+        except asyncio.TimeoutError:
+            return "❌ Таймаут при запросе списка файлов (>15s). API не отвечает или медленное соединение."
         
         file_list = result.get("list", [])
         
